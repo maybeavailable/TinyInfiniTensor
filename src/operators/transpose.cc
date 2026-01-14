@@ -34,7 +34,28 @@ namespace infini
         // REF: https://onnx.ai/onnx/operators/onnx__Transpose.html#transpose-21
         // =================================== 作业 ===================================
 
-        return std::nullopt;
+        IT_ASSERT(static_cast<int>(input_dim.size()) == rank);
+
+        // If perm is not provided, ONNX default is reversing the dimensions.
+        vector<int> perm = transposePermute;
+        if (perm.empty()) {
+            perm.resize(rank);
+            for (int i = 0; i < rank; ++i)
+                perm[i] = rank - 1 - i;
+        }
+
+        IT_ASSERT(static_cast<int>(perm.size()) == rank);
+
+        vector<int> seen(rank, 0);
+        for (int outAxis = 0; outAxis < rank; ++outAxis)
+        {
+            int inAxis = perm[outAxis];
+            IT_ASSERT(inAxis >= 0 && inAxis < rank);
+            IT_ASSERT(++seen[inAxis] == 1);
+            output_dim[outAxis] = input_dim[inAxis];
+        }
+
+        return {{output_dim}};
     }
 
     std::string TransposeObj::toString() const
