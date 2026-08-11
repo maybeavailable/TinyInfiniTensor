@@ -1,16 +1,29 @@
 #include "utils/operator_utils.h"
 #include "core/runtime.h"
+#include <algorithm>
 
 namespace infini {
 
 Shape infer_broadcast(const Shape &A, const Shape &B) {
 
     // =================================== 作业 ===================================
-    // TODO：对 A 和 B 进行双向广播，返回广播后的形状。
-    // REF: https://github.com/onnx/onnx/blob/main/docs/Broadcasting.md
+    // ONNX 双向广播（numpy 规则）：
+    //   - 从右往左逐维对齐
+    //   - 每维要么相等，要么有一个是 1（1 会广播成另一边）
+    //   - 输出 shape = 逐维取 max
+    // 例如 {1,3,2,4} 与 {4} 广播 → {1,3,2,4}
     // =================================== 作业 ===================================
-    
-    return {};
+    int rank = std::max(A.size(), B.size());
+    Shape result(rank, 1);
+    for (int i = 1; i <= rank; ++i)
+    {
+        int a = i <= (int)A.size() ? A[A.size() - i] : 1;
+        int b = i <= (int)B.size() ? B[B.size() - i] : 1;
+        IT_ASSERT(a == b || a == 1 || b == 1,
+                  "Incompatible shapes for broadcast");
+        result[rank - i] = std::max(a, b);
+    }
+    return result;
 }
 
 int get_real_axis(const int &axis, const int &rank) {

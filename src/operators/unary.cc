@@ -36,10 +36,10 @@ namespace infini
     optional<vector<Shape>> ClipObj::inferShape(const TensorVec &inputs)
     {
         // =================================== 作业 ===================================
-        // TODO：返回经过 clip 操作后的 shape
-        // REF: https://onnx.ai/onnx/operators/onnx__Clip.html#clip-13
+        const auto A = inputs[0];
+        return {{A->getDims()}};
         // =================================== 作业 ===================================
-        return std::nullopt;
+
     }
 
     std::string ClipObj::toString() const
@@ -62,20 +62,18 @@ namespace infini
     vector<DataType> CastObj::inferDataType(const TensorVec &inputs) const
     {
         // =================================== 作业 ===================================
-        // TODO：返回经过 cast 操作后, 输出 tensor 的数目和数据类型
-        // REF_FILE: src/core/operator.cc
-        // REF: https://onnx.ai/onnx/operators/onnx__Cast.html#cast-21
+        // cast 按 castType 转换数据类型；输出只有一个 tensor，类型由 getOutputDataType 给出
         // =================================== 作业 ===================================
-        return {};
+        return {getOutputDataType()};
     }
 
     optional<vector<Shape>> CastObj::inferShape(const TensorVec &inputs)
     {
         // =================================== 作业 ===================================
-        // TODO：返回经过 cast 操作后的 shape
-        // REF: https://onnx.ai/onnx/operators/onnx__Cast.html#cast-21
+        // cast 是逐元素操作，输出的 shape 与输入一致
         // =================================== 作业 ===================================
-        return std::nullopt;
+        const auto A = inputs[0];
+        return {{A->getDims()}};
     }
 
     std::string CastObj::toString() const

@@ -1,7 +1,11 @@
 #include "core/graph.h"
+#include "operators/matmul.h"
+#include "operators/transpose.h"
 #include <algorithm>
 #include <numeric>
 #include <queue>
+#include <unordered_map>
+#include <unordered_set>
 
 namespace infini
 {
@@ -101,11 +105,143 @@ namespace infini
     void GraphObj::optimize()
     {
         // =================================== 作业 ===================================
-        // TODO: 设计一个算法来实现指定的图优化规则
-        // 图优化规则如下：
-        // 1. 去除冗余的算子（例如，两个相邻的算子都是 transpose 算子，且做的是相反的操作，可以将其全部删除）
-        // 2. 合并算子（例如，矩阵乘算子中含有属性transA、transB，如果其输入存在transpose，且对最后两个维度做交换，就可以将transpose融入到矩阵乘算子的属性中去）
+        // 图优化规则：
+        //   1. 删除相邻且互逆的 transpose 算子（两个 transpose 复合为单位置换时互相抵消）
+        //   2. 把 matmul 输入前的、仅交换最后两维的 transpose 融合进 transA / transB
         // =================================== 作业 ===================================
+        // perm 是否恰好是"交换最后两维"的置换
+        auto isSwapLastTwo = [](const std::vector<int> &perm, int rank) -> bool {
+            if ((int)perm.size() != rank)
+                return false;
+            for (int d = 0; d < rank; ++d)
+            {
+                int expected =
+                    (d == rank - 2) ? rank - 1 : (d == rank - 1) ? rank - 2 : d;
+                if (perm[d] != expected)
+                    return false;
+            }
+            return true;
+        };
+        // 两个置换 P、Q 复合后是否为单位置换：transpose(Q, transpose(P, x)) == x
+        auto composeIsIdentity = [](const std::vector<int> &P,
+                                    const std::vector<int> &Q) -> bool {
+            if (P.size() != Q.size())
+                return false;
+            for (size_t j = 0; j < Q.size(); ++j)
+                if (P[Q[j]] != (int)j)
+                    return false;
+            return true;
+        };
+        // 删除 op 时同步清理所有反向连接，避免残留悬空的 weak_ptr
+        auto removeOp = [this](const Operator &op) {
+            for (auto &in : op->getInputs())
+                if (in)
+                    in->removeTarget(op);
+            for (auto &out : op->getOutputs())
+                if (out)
+                    out->setSource(nullptr);
+            for (auto &pred : op->getPredecessors())
+                if (pred)
+                    pred->removeSuccessors(op);
+            for (auto &succ : op->getSuccessors())
+                if (succ)
+                    succ->removePredecessors(op);
+            removeOperator(op);
+        };
+
+        std::unordered_set<OperatorObj *> deadOps;
+        std::unordered_set<UidBaseType> deadTensors;
+
+        // ---- 规则 2：把 matmul 输入前的 transpose 融合进 transA / transB ----
+        for (auto &op : ops)
+        {
+            if (op->getOpType() != OpType::MatMul)
+                continue;
+            auto matmul = as<MatmulObj>(op);
+
+            // 沿输入 0（-> transA）或输入 1（-> transB）一路跳过可融合的 transpose
+            auto fold = [&](int inputIdx, bool &flipped) {
+                auto in = matmul->getInputs(inputIdx);
+                while (in && in->getSource() &&
+                       in->getSource()->getOpType() == OpType::Transpose)
+                {
+                    auto trans = as<TransposeObj>(in->getSource());
+                    if (!isSwapLastTwo(trans->getPermute(), in->getRank()))
+                        break;
+
+                    flipped = !flipped;
+                    auto next = trans->getInputs(0);
+                    matmul->replaceInput(in, next); // 输入改为跳过这个 transpose
+                    next->addTarget(matmul);        // matmul 现在消费 next
+                    in->removeTarget(matmul);       // matmul 不再消费 in
+                    deadOps.insert(trans.get());
+                    deadTensors.insert(in->getFuid());
+                    in = next;
+                }
+            };
+            bool flipA = false, flipB = false;
+            fold(0, flipA);
+            fold(1, flipB);
+            if (flipA)
+                matmul->setTransA(!matmul->getTransA());
+            if (flipB)
+                matmul->setTransB(!matmul->getTransB());
+        }
+
+        // ---- 规则 1：删除相邻且互逆的 transpose 对 ----
+        // 用 while 循环，因为消掉一对后可能暴露出新的可消除对
+        bool changed = true;
+        while (changed)
+        {
+            changed = false;
+            for (auto &op : ops)
+            {
+                if (deadOps.count(op.get()) || op->getOpType() != OpType::Transpose)
+                    continue;
+                auto out = op->getOutput();
+                auto in = op->getInputs(0);
+                if (!in || !in->getSource() || deadOps.count(in->getSource().get()))
+                    continue;
+                auto pred = in->getSource();
+                if (pred->getOpType() != OpType::Transpose)
+                    continue;
+
+                auto opTrans = as<TransposeObj>(op);
+                auto predTrans = as<TransposeObj>(pred);
+                if (!composeIsIdentity(predTrans->getPermute(), opTrans->getPermute()))
+                    continue;
+
+                // pred: pIn -> in ；op: in -> out ，两者复合为单位置换，
+                // 所以所有消费 out 的算子可以直接改用 pIn
+                auto pIn = predTrans->getInputs(0);
+                for (auto &consumer : out->getTargets())
+                {
+                    consumer->replaceInput(out, pIn);
+                    out->removeTarget(consumer);
+                    pIn->addTarget(consumer);
+                }
+                deadOps.insert(op.get());
+                deadOps.insert(pred.get());
+                deadTensors.insert(in->getFuid());
+                deadTensors.insert(out->getFuid());
+                changed = true;
+            }
+        }
+
+        // ---- 清理：删除死 op 与死 tensor ----
+        std::vector<Operator> removeOps;
+        for (auto &op : ops)
+            if (deadOps.count(op.get()))
+                removeOps.emplace_back(op);
+        for (auto &op : removeOps)
+            removeOp(op);
+
+        std::vector<Tensor> removeTensors;
+        for (auto &t : tensors)
+            if (deadTensors.count(t->getFuid()))
+                removeTensors.emplace_back(t);
+        for (auto &t : removeTensors)
+            removeTensor(t);
     }
 
     Tensor GraphObj::getTensor(int fuid) const
@@ -149,8 +285,47 @@ namespace infini
         IT_ASSERT(topo_sort() == true);
 
         // =================================== 作业 ===================================
-        // TODO：利用 allocator 给计算图分配内存
-        // HINT: 获取分配好的内存指针后，可以调用 tensor 的 setDataBlob 函数给 tensor 绑定内存
+        // 记录每个 tensor 剩余的消费者个数：减到 0 说明之后不会再被使用，内存可回收
+        std::unordered_map<UidBaseType, int> refCount;
+        for (auto &t : tensors)
+            refCount[t->getFuid()] = t->getTargets().size();
+
+        // 每个 tensor 在 allocator 中分到的偏移
+        std::unordered_map<UidBaseType, size_t> offsets;
+
+        // ① 图的输入 tensor（没有 source）全程存活，最先分配、永不回收
+        for (auto &input : getInputs())
+            offsets[input->getFuid()] = allocator.alloc(input->getBytes());
+
+        // ② 按拓扑序遍历 op：先回收本 op 消费完的输入，再给输出分配
+        for (auto &op : ops)
+        {
+            // 本 op 消费一次输入，引用计数减到 0 后内存可交给 allocator 回收
+            for (auto &input : op->getInputs())
+            {
+                if (input && input->getSource()) // 图输入无 source，不回收
+                {
+                    auto fuid = input->getFuid();
+                    if (--refCount[fuid] == 0)
+                        allocator.free(offsets[fuid], input->getBytes());
+                }
+            }
+
+            // 给输出 tensor 分配内存
+            for (auto &output : op->getOutputs())
+            {
+                if (output)
+                    offsets[output->getFuid()] = allocator.alloc(output->getBytes());
+            }
+        }
+
+        // ③ 记账已完成，peak 已定；真正 malloc 一次（getPtr），再给所有 tensor 绑定
+        void *base = allocator.getPtr();
+        for (auto &t : tensors)
+        {
+            if (auto it = offsets.find(t->getFuid()); it != offsets.end())
+                t->setDataBlob(make_ref<BlobObj>(runtime, (char *)base + it->second));
+        }
         // =================================== 作业 ===================================
 
         allocator.info();

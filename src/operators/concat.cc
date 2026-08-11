@@ -14,9 +14,13 @@ optional<vector<Shape>> ConcatObj::inferShape(const TensorVec &inputs) {
     auto rank = inputs[0]->getRank();
 
     // =================================== 作业 ===================================
-    // TODO：修改 dims，返回正确的 concat 后的 shape
-    // REF: https://onnx.ai/onnx/operators/onnx__Concat.html#concat-13
+    // concat：除 dim 维度外，其余维度必须一致；输出在 dim 维上是所有输入的求和
+    // 例如 {1,3,2,4} 与 {1,3,2,5} 在 dim=3 上 concat → {1,3,2,9}
     // =================================== 作业 ===================================
+    int sum = 0;
+    for (auto &input : inputs)
+        sum += input->getDims()[dim];
+    dims[dim] = sum;
 
     return {{dims}};
 }

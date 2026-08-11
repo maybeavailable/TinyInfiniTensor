@@ -7,7 +7,6 @@
 #include <cstddef>
 #include <map>
 #include <unordered_set>
-
 namespace infini {
   class Allocator
   {
@@ -24,9 +23,10 @@ namespace infini {
     void *ptr;
 
     // =================================== 作业 ===================================
-    // TODO：可能需要设计一个数据结构来存储free block，以便于管理和合并
-    // HINT: 可以使用一个 map 来存储 free block，key 为 block 的起始/结尾地址，value 为 block 的大小
+    // 空闲块表：key 为 block 的起始地址，value 为 block 的大小。
+    // 利用 map 的有序性，可以快速找到相邻的空闲块用于合并
     // =================================== 作业 ===================================
+    std::map<size_t, size_t> free_blocks;
 
   public:
     Allocator(Runtime runtime);
